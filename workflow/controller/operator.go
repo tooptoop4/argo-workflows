@@ -1262,6 +1262,10 @@ func recentlyStarted(node wfv1.NodeStatus) bool {
 	return time.Since(node.StartedAt.Time) <= envutil.LookupEnvDurationOr("RECENTLY_STARTED_POD_DURATION", 10*time.Second)
 }
 
+func podStuckInPending(node wfv1.NodeStatus) bool {
+	return time.Since(node.StartedAt.Time) >= envutil.LookupEnvDurationOr("STUCK_PENDING_POD_DURATION", 60*time.Minute)
+}
+
 // shouldPrintPodSpec return eligible to print to the pod spec
 func (woc *wfOperationCtx) shouldPrintPodSpec(node *wfv1.NodeStatus) bool {
 	return woc.controller.Config.PodSpecLogStrategy.AllPods ||
@@ -1392,6 +1396,9 @@ func (woc *wfOperationCtx) assessNodeStatus(ctx context.Context, pod *apiv1.Pod,
 		woc.controller.metrics.ChangePodPhase(ctx, string(new.Phase), pod.ObjectMeta.Namespace)
 	}
 
+	
+	podStuckInPending := podStuckInPending(old)
+
 	// if it's ContainerSetTemplate pod then the inner container names should match to some node names,
 	// in this case need to update nodes according to container status
 	for _, c := range pod.Status.ContainerStatuses {
@@ -1401,7 +1408,14 @@ func (woc *wfOperationCtx) assessNodeStatus(ctx context.Context, pod *apiv1.Pod,
 		}
 		switch {
 		case c.State.Waiting != nil:
-			woc.markNodePhase(ctrNodeName, wfv1.NodePending)
+			//todo this is not enough because it could loop over the wait ctr status before or after and that might override with wrong thing
+			//also todo the init statuses below could also have override issue....really should put on top of other pr
+			//also todo init container might be stuck with waiting != nil
+			if podStuckInPending && c.Name == common.MainContainerName {
+				woc.markNodePhase(ctrNodeName, wfv1.NodeError, "Pod stuck")
+			} else {
+				woc.markNodePhase(ctrNodeName, wfv1.NodePending)
+			}
 		case c.State.Running != nil:
 			woc.markNodePhase(ctrNodeName, wfv1.NodeRunning)
 		case c.State.Terminated != nil:
